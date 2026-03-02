@@ -57,3 +57,4 @@ dist/
 # 如果这造成困扰，请手动管理。
 
 auto_captures/
+build/

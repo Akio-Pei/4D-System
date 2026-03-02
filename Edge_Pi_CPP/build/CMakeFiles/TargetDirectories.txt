@@ -1,3 +1,0 @@
-/home/baozi/4D_System/build/CMakeFiles/4D_System_Pi.dir
-/home/baozi/4D_System/build/CMakeFiles/edit_cache.dir
-/home/baozi/4D_System/build/CMakeFiles/rebuild_cache.dir
