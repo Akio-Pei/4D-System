@@ -1,8 +1,12 @@
-makefile linguist-generated=true
-Makefile linguist-generated=true
-*.mk linguist-generated=true
-*.make linguist-generated=true
-CMakeLists.txt linguist-generated=true
-*.cmake linguist-generated=true
+**/*akefile linguist-vendored
+**/*.mk linguist-vendored
+**/*.make linguist-vendored
+**/CMakeLists.txt linguist-vendored
+**/*.cmake linguist-vendored
+
+
+*akefile linguist-detectable=false
+*.mk linguist-detectable=false
+
 
 *.h linguist-language=C++
