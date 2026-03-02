@@ -55,3 +55,5 @@ dist/
 # 注意：Python打包通常也会生成 build/，但因为上面第3条我们强制保留了 build/
 # 所以这里 Python setup.py 生成的 build 也会被上传。
 # 如果这造成困扰，请手动管理。
+
+auto_captures/

@@ -3,58 +3,74 @@ import numpy as np
 
 
 class PseudoEventGen:
-    def __init__(self, width=1280, height=800, threshold=25):
+    def __init__(self, width, height, threshold=20):
         self.w = width
         self.h = height
-        # 阈值调高：防止噪点导致全屏白
-        self.threshold = threshold
-        self.prev_frame = None
 
-    def process(self, curr_img_raw):
+        # === 快速预览版状态 (Lite) ===
+        self.prev_fast = None
+
+        # === 满血录制版状态 (HQ) ===
+        self.prev_hq = None
+        # 去噪核：用于过滤孤立的事件噪点
+        self.hq_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
+
+    def process_fast(self, current_frame):
         """
-        [极速版] 瞬态差分事件生成
-        Ref: "Event-based Sensor Model", simulating Log-Intensity changes.
+        [预览流] 极速线性差分
+        用途：实时屏幕显示、运动检测触发
+        特点：计算极快(<1ms)，但噪点较多
         """
-        if curr_img_raw is None: return None
+        curr = current_frame.astype(np.int16)
 
-        # 1. 极速预处理
-        # 9281 的原始数据 (uint8)
-        # 真实事件相机对"对数光强"敏感，这能抵抗光照不均
-        # Log 运算比较慢，我们用近似算法：直接用 int16 做差分，避免溢出
-        curr = curr_img_raw.astype(np.int16)
-
-        if self.prev_frame is None:
-            self.prev_frame = curr
+        if self.prev_fast is None:
+            self.prev_fast = curr
             return np.zeros((self.h, self.w), dtype=np.uint8)
 
-        # 2. 计算差分 (Delta)
-        # diff = Current - Previous
-        diff = cv2.subtract(curr, self.prev_frame)
+        diff = curr - self.prev_fast
+        self.prev_fast = curr
 
-        # 3. 极性阈值清洗 (Thresholding)
-        # 只有变化幅度超过阈值的像素才被认为是"事件"
-        # 正向变化 (变亮) -> 255
-        # 负向变化 (变暗) -> 255 (或者区分颜色，这里为了融合统一用255)
+        mask = np.zeros((self.h, self.w), dtype=np.uint8)
+        mask[np.abs(diff) > 25] = 255
+        return mask
 
-        # 这是一个极速操作：
-        # abs(diff) > threshold
-        abs_diff = np.abs(diff)
+    def process_hq(self, current_frame):
+        """
+        [生产流] 满血对数域模拟 (Full-Blooded)
+        用途：HexPlane 训练数据生成
+        特点：
+        1. Log 变换：模拟真实事件相机对光照的非线性响应
+        2. 物理阈值：模拟 C 参数
+        3. 形态学去噪：提供干净的边缘特征
+        """
+        # 转为浮点并加1防止log(0)
+        curr_float = current_frame.astype(np.float32) + 1.0
 
-        # 自适应阈值：如果画面太亮/太白，自动提高门槛
-        # 简单统计一下平均变化量，如果全屏都在变（白屏），就动态提高阈值
-        mean_change = np.mean(abs_diff)
-        dynamic_thresh = self.threshold + int(mean_change * 1.5)
+        if self.prev_hq is None:
+            self.prev_hq = curr_float
+            return np.zeros((self.h, self.w), dtype=np.uint8)
 
-        # 生成掩码 (0 或 255)
-        _, event_mask = cv2.threshold(abs_diff.astype(np.uint8), dynamic_thresh, 255, cv2.THRESH_BINARY)
+        # 1. 对数域变换 (Log Domain)
+        # 真实事件相机感知的是亮度的对比度变化 (Log差)，而不是绝对差
+        curr_log = np.log(curr_float)
+        prev_log = np.log(self.prev_hq)
 
-        # 4. 形态学去噪 (可选，非常快)
-        # 去掉孤立的噪点，只保留连续的边缘
-        # kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (2, 2))
-        # event_mask = cv2.morphologyEx(event_mask, cv2.MORPH_OPEN, kernel)
+        # 2. 计算变化率
+        diff = curr_log - prev_log
+        self.prev_hq = curr_float
 
-        # 5. 更新上一帧
-        # 关键：不要用 curr，而是用 curr 更新 prev
-        self.prev_frame = curr
+        # 3. 物理阈值 (Sensitivity)
+        # 0.15 大约对应 15% 的亮度变化，是常用的事件相机阈值
+        evt_mask = np.zeros((self.h, self.w), dtype=np.uint8)
+        evt_mask[np.abs(diff) > 0.15] = 255
 
-        return event_mask
+        # 4. 强力去噪 (Denoise)
+        # 消除传感器热噪声产生的孤立白点，保证HexPlane学到的是物体轮廓
+        clean_mask = cv2.morphologyEx(evt_mask, cv2.MORPH_OPEN, self.hq_kernel)
+
+        return clean_mask
+
+    def reset(self):
+        """ 每次开始录制时重置状态，防止上一段录制的残影 """
+        self.prev_fast = None
+        self.prev_hq = None

@@ -1,8 +1,13 @@
 import numpy as np
 import cv2
 import os
+import json
+import datetime
+import subprocess  # <--- [新增] 用于启动脚本
+import sys  # <--- [新增] 用于获取 python 环境
 from PyQt6.QtWidgets import (QMainWindow, QWidget, QHBoxLayout, QVBoxLayout, QPushButton,
-                             QFrame, QGridLayout, QLabel, QTextEdit, QSizePolicy, QSlider, QMessageBox)
+                             QFrame, QGridLayout, QLabel, QTextEdit, QSizePolicy, QSlider, QMessageBox,
+                             QFileDialog)  # <--- [新增] QFileDialog
 from PyQt6.QtCore import Qt, pyqtSlot, QRect, pyqtSignal
 from PyQt6.QtGui import QPainter, QColor, QPen, QImage, QPixmap, QFont, QIcon
 from core.data_link import DataReceiver
@@ -15,7 +20,7 @@ TRANS = {
         "btn_start": "SYSTEM START", "btn_stop": "SYSTEM HALT",
         "mode_locked": "MODE: LOCKED", "mode_adjust": "MODE: ADJUST",
         "check": "CHECKER PATTERN", "rot": "ROTATION", "scale": "SCALE", "fine": "FINE",
-        "lang": "LANG: EN", "gen_4d": "GENERATE 4D MODEL",
+        "lang": "LANG: EN", "gen_4d": "RUN HEXPLANE BRIDGE",  # 修改了文案
         "hud_main": "FUSION OPTIC", "hud_sub1": "THERMAL SENSOR", "hud_sub2": "EVENT TRACKER",
         "hud_roi": "TARGET ROI", "hud_depth": "ROUGH 4D DEPTH"
     },
@@ -24,7 +29,7 @@ TRANS = {
         "btn_start": "系统启动", "btn_stop": "系统终止",
         "mode_locked": "模式: 锁定", "mode_adjust": "模式: 校准",
         "check": "棋盘对比", "rot": "旋转修正", "scale": "缩放调整", "fine": "精细微调",
-        "lang": "语言: 中文", "gen_4d": "后台生成4D模型",
+        "lang": "语言: 中文", "gen_4d": "一键生成4D模型",  # 修改了文案
         "hud_main": "融合主视野", "hud_sub1": "热成像传感器", "hud_sub2": "事件流传感器",
         "hud_roi": "目标特写", "hud_depth": "实时4D预览"
     }
@@ -62,7 +67,8 @@ class HUDDisplay(QLabel):
         self.setCursor(Qt.CursorShape.CrossCursor)
 
     def set_display_name(self, name):
-        self.display_name = name; self.update()
+        self.display_name = name;
+        self.update()
 
     def update_frame(self, cv_img, content_type, info=None, raw_t=None):
         try:
@@ -73,10 +79,13 @@ class HUDDisplay(QLabel):
             if not cv_img.flags['C_CONTIGUOUS']: cv_img = np.ascontiguousarray(cv_img)
             h, w = cv_img.shape[:2]
             if len(cv_img.shape) == 2:
-                fmt = QImage.Format.Format_Grayscale8; bpl = w
+                fmt = QImage.Format.Format_Grayscale8;
+                bpl = w
             else:
-                fmt = QImage.Format.Format_RGB888; cv_img = cv2.cvtColor(cv_img, cv2.COLOR_BGR2RGB); bpl = \
-                cv_img.strides[0]
+                fmt = QImage.Format.Format_RGB888;
+                cv_img = cv2.cvtColor(cv_img, cv2.COLOR_BGR2RGB);
+                bpl = \
+                    cv_img.strides[0]
             q_img = QImage(cv_img.data, w, h, bpl, fmt)
             self.setPixmap(QPixmap.fromImage(q_img).scaled(self.size(), Qt.AspectRatioMode.KeepAspectRatio,
                                                            Qt.TransformationMode.FastTransformation))
@@ -128,11 +137,6 @@ class HUDDisplay(QLabel):
             if self.is_main and self.info.get("rec") == "REC":
                 p.setPen(QColor(255, 0, 0));
                 p.drawText(r.right() - 40, r.top() + 15, "● REC")
-
-            if self.hover_temp is not None and hasattr(self, 'last_mouse_pos_for_paint'):
-                mx = self.last_mouse_pos_for_paint.x();
-                my = self.last_mouse_pos_for_paint.y()
-                if self.is_main and self.content_type == "THERMAL" and self.raw_thermal is not None: pass
         else:
             p.setPen(QColor(80, 80, 80));
             p.setFont(QFont("Consolas", 10))
@@ -149,14 +153,15 @@ class MainWindow(QMainWindow):
         self.setStyleSheet(
             "QMainWindow { background: #080808; } QLabel { color: #0f0; font-family: Consolas; } QTextEdit { background: #000; border: 1px solid #333; color: #0f0; }")
 
-        # === 核心修复：完整注册所有窗口，确保点击有效 ===
         self.win_state = {
             "hud_main": "FUSION",
             "hud_sub1": "THERMAL",
             "hud_sub2": "EVENT",
-            "hud_roi": "ROI",  # 必须注册！
-            "hud_depth": "DEPTH"  # 必须注册！
+            "hud_roi": "ROI",
+            "hud_depth": "DEPTH"
         }
+
+        self.is_recording = False
         self.init_ui();
         self.update_ui_text()
 
@@ -182,9 +187,9 @@ class MainWindow(QMainWindow):
         self.hud_sub2 = HUDDisplay("hud_sub2", "#00ffff", False, "EVENT DISC.")
         self.hud_sub2.clicked.connect(self.handle_swap)
         self.hud_roi = HUDDisplay("hud_roi", "#ff00ff", False, "NO TARGET")
-        self.hud_roi.clicked.connect(self.handle_swap)  # 连接点击
+        self.hud_roi.clicked.connect(self.handle_swap)
         self.hud_depth = HUDDisplay("hud_depth", "#ffff00", False, "WAITING...")
-        self.hud_depth.clicked.connect(self.handle_swap)  # 连接点击
+        self.hud_depth.clicked.connect(self.handle_swap)
 
         self.r_lay.addWidget(self.hud_sub1, 0, 0);
         self.r_lay.addWidget(self.hud_sub2, 0, 1)
@@ -199,8 +204,7 @@ class MainWindow(QMainWindow):
         self.align_frame = QFrame();
         self.align_frame.setStyleSheet("border:1px solid #004400; background:#020202;")
         self.align_frame.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum)
-
-        ag = QGridLayout(self.align_frame)
+        ag = QGridLayout(self.align_frame);
         ag.setContentsMargins(6, 6, 6, 6);
         ag.setVerticalSpacing(6)
 
@@ -230,14 +234,12 @@ class MainWindow(QMainWindow):
         ag.addWidget(self.sld_sc, 2, 1)
 
         dc_layout.addWidget(self.align_frame)
-
         self.log_v = QTextEdit();
         self.log_v.setReadOnly(True);
         self.log_v.setFixedHeight(45)
         self.log_v.setStyleSheet(
             "border: 1px solid #333; font-size: 10px; background: #000; color: #0f0; margin: 0px; border-top: 0px;")
         dc_layout.addWidget(self.log_v)
-
         self.r_lay.addWidget(self.debug_container, 2, 0, 1, 2)
 
         self.core_container = QWidget()
@@ -248,6 +250,7 @@ class MainWindow(QMainWindow):
         self.btn_gen = QPushButton("GENERATE 4D MODEL");
         self.btn_gen.setStyleSheet(
             "background:#442200; color:#fa0; font-weight:bold; padding:6px; border:1px solid #fa0;")
+        # 🔥 连接到新的调用函数
         self.btn_gen.clicked.connect(self.generate_4d)
         cc_layout.addWidget(self.btn_gen)
 
@@ -269,7 +272,6 @@ class MainWindow(QMainWindow):
         bot_row.addWidget(self.btn_lang);
         bot_row.addWidget(self.btn_start)
         cc_layout.addLayout(bot_row)
-
         self.r_lay.addWidget(self.core_container, 3, 0, 1, 2)
 
         layout.addWidget(self.hud_main, 65);
@@ -279,6 +281,32 @@ class MainWindow(QMainWindow):
         self.r_lay.setRowStretch(2, 0);
         self.r_lay.setRowStretch(3, 0)
 
+    def generate_4d(self):
+        """
+        弹出文件选择框，选择文件夹后，自动调用 bridge.py
+        """
+        # 默认打开 auto_captures 方便选择
+        default_dir = os.path.join(os.getcwd(), "auto_captures")
+        if not os.path.exists(default_dir): os.makedirs(default_dir, exist_ok=True)
+
+        target_dir = QFileDialog.getExistingDirectory(self, "Select Recorded Data Folder", default_dir)
+
+        if target_dir:
+            self.log(f">>> Selected for 4D: {os.path.basename(target_dir)}")
+            self.log(f">>> Launching Bridge...")
+
+            script_path = os.path.join("tools", "bridge.py")
+            if not os.path.exists(script_path):
+                QMessageBox.critical(self, "Error", f"Missing {script_path}!\nPlease create it first.")
+                return
+
+            try:
+                # 启动 bridge.py，传入选中的文件夹路径
+                subprocess.Popen([sys.executable, script_path, "--target", target_dir])
+            except Exception as e:
+                QMessageBox.critical(self, "Error", f"Failed to launch bridge:\n{e}")
+
+    # ... (其他函数保持不变) ...
     def keyPressEvent(self, event):
         if event.key() == Qt.Key.Key_F11:
             if self.isFullScreen():
@@ -286,13 +314,9 @@ class MainWindow(QMainWindow):
             else:
                 self.showFullScreen()
 
-    def generate_4d(self):
-        self.log(">>> [TASK] Starting Background 4D Gaussian Splatting...")
-        QMessageBox.information(self, "4D Generation",
-                                "HexPlane training started in background.\n(Check console for progress)")
-
     def toggle_lang(self):
-        self.cur_lang = "CN" if self.cur_lang == "EN" else "EN"; self.update_ui_text()
+        self.cur_lang = "CN" if self.cur_lang == "EN" else "EN";
+        self.update_ui_text()
 
     def update_ui_text(self):
         t = TRANS[self.cur_lang];
@@ -301,7 +325,7 @@ class MainWindow(QMainWindow):
         self.btn_mode.setText(t["mode_adjust"] if "ADJUST" in self.btn_mode.text() else t["mode_locked"])
         self.btn_check.setText(t["check"]);
         self.btn_lang.setText(t["lang"]);
-        self.btn_gen.setText(t["gen_4d"])
+        self.btn_gen.setText(t["gen_4d"])  # 更新文案
         self.lbl_rot.setText(t["rot"]);
         self.lbl_sc.setText(t["scale"])
         for hud in [self.hud_main, self.hud_sub1, self.hud_sub2, self.hud_roi, self.hud_depth]:
@@ -315,26 +339,22 @@ class MainWindow(QMainWindow):
             from collections import deque
             self.qv = deque(maxlen=4);
             self.qt = deque(maxlen=4)
-
             self.th_v = DataReceiver(PORT_VIDEO, self.qv, "video");
             self.th_t = DataReceiver(PORT_THERMAL, self.qt, "thermal");
-            self.th_v.log_signal.connect(self.log)
+            self.th_v.log_signal.connect(self.log);
             self.th_t.log_signal.connect(self.log)
             self.th_v.start();
             self.th_t.start()
-
             self.eng = SyncEngine(self.qv, self.qt)
             self.eng.update_signal.connect(self.update_displays);
             self.eng.log_signal.connect(self.log)
             self.eng.start()
-
             self.btn_start.setDisabled(True);
             self.btn_mode.setEnabled(True);
             self.btn_check.setEnabled(True)
-            t = TRANS[self.cur_lang]
             self.eng.set_mode("ADJUST");
-            self.btn_mode.setText(t["mode_adjust"]);
-            self.btn_start.setText(t["btn_stop"])
+            self.btn_mode.setText(TRANS[self.cur_lang]["mode_adjust"]);
+            self.btn_start.setText(TRANS[self.cur_lang]["btn_stop"])
             self.debug_container.setVisible(True)
         except Exception as e:
             QMessageBox.critical(self, "System Error", f"Startup Failed:\n{e}")
@@ -360,12 +380,12 @@ class MainWindow(QMainWindow):
         self.eng.update_align_params(toggle_checker=True)
 
     def handle_drag(self, dx, dy):
-        if self.win_state["hud_main"] == "FUSION" and "ADJUST" in self.btn_mode.text():
-            self.eng.update_align_params(dx=dx, dy=dy)
+        c_type = self.win_state["hud_main"]
+        if c_type == "DEPTH": self.eng.update_depth_rotation(dx, dy); return
+        if c_type == "FUSION" and "ADJUST" in self.btn_mode.text(): self.eng.update_align_params(dx=dx, dy=dy)
 
     def handle_swap(self, clicked_key):
         if clicked_key == "hud_main": return
-        # 现在有了完整的映射，点击任何小窗都能生效
         c_clk = self.win_state.get(clicked_key, "NONE");
         c_main = self.win_state["hud_main"]
         if c_clk == "NONE": return
@@ -377,9 +397,7 @@ class MainWindow(QMainWindow):
     @pyqtSlot(np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, dict)
     def update_displays(self, fus, raw_therm, raw_evt, roi, depth, info):
         try:
-            # 完整映射表，确保所有窗口都能接收到数据
             content_map = {"FUSION": fus, "THERMAL": raw_therm, "EVENT": raw_evt, "ROI": roi, "DEPTH": depth}
-
             for hud_key in ["hud_main", "hud_sub1", "hud_sub2", "hud_roi", "hud_depth"]:
                 c_type = self.win_state.get(hud_key, "NONE")
                 img = content_map.get(c_type, None)
