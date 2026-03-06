@@ -1,6 +1,6 @@
 from PyQt6.QtWidgets import QLabel
 from PyQt6.QtGui import QImage, QPixmap, QPainter, QColor, QPen, QFont
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import Qt, QRect
 import numpy as np
 import cv2
 

@@ -2,171 +2,172 @@ import os
 import sys
 import subprocess
 import argparse
-import shutil
 import json
 import glob
+import datetime
 import numpy as np
 import cv2
-import datetime
-from tqdm import tqdm
 
-# ================= 配置区域 =================
 HEXPLANE_PYTHON = r"D:\Anaconda3\envs\hexplane\python.exe"
 HEXPLANE_CODE_DIR = r"D:\CPP\HexPlane"
-TARGET_SIZE = 800  # 强制正方形尺寸
+TARGET_SIZE = 200
 
 
-# ===========================================
+def build_metadata(target_dir, output_dir):
+    img_src = os.path.join(target_dir, "visual")
+    all_files = sorted(glob.glob(os.path.join(img_src, "*.png")))
+    if not all_files: return False
 
-def process_images_internally(source_dir, output_dir):
-    vis_dir = os.path.join(source_dir, "visual")
-    therm_dir = os.path.join(source_dir, "thermal")
-    out_img_dir = os.path.join(output_dir, "images")
+    files = all_files[:60] if len(all_files) > 60 else all_files
+    print(f"✅ [Data] 准备 {len(files)} 帧连续素材...", flush=True)
 
-    os.makedirs(out_img_dir, exist_ok=True)
-
-    files = sorted(glob.glob(os.path.join(vis_dir, "*.png")))
-    if not files:
-        print("❌ 错误：在 visual 文件夹里没找到图片！")
-        return False
-
-    print(f"🔥 [1/3] 强制重制 {len(files)} 张图片 ({TARGET_SIZE}x{TARGET_SIZE})...")
+    img_dest_dir = os.path.join(output_dir, "images")
+    os.makedirs(img_dest_dir, exist_ok=True)
 
     frames = []
-    for idx, f_vis in enumerate(tqdm(files)):
-        fname = os.path.basename(f_vis)
+    c2w = [
+        [1.0, 0.0, 0.0, 0.0],
+        [0.0, 1.0, 0.0, 0.0],
+        [0.0, 0.0, 1.0, 3.0],
+        [0.0, 0.0, 0.0, 1.0]
+    ]
 
-        # 1. 读取
-        img_v = cv2.imread(f_vis, cv2.IMREAD_GRAYSCALE)
-        if img_v is None: continue
-        H, W = img_v.shape
-
-        # 2. 读取热成像
-        t_path = os.path.join(therm_dir, fname)
-        if os.path.exists(t_path):
-            img_t_raw = cv2.imread(t_path, cv2.IMREAD_UNCHANGED)
-            t_norm = cv2.normalize(img_t_raw, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
-            t_norm = cv2.resize(t_norm, (W, H))
-        else:
-            t_norm = np.zeros_like(img_v)
-
-        # 3. 合成
-        fusion = np.zeros((H, W, 3), dtype=np.uint8)
-        fusion[:, :, 0] = img_v
-        fusion[:, :, 1] = t_norm
-        fusion[:, :, 2] = img_v
-
-        # 4. 强制中心裁剪
-        crop_size = min(H, W)
-        start_x = (W - crop_size) // 2
-        start_y = (H - crop_size) // 2
-        square = fusion[start_y:start_y + crop_size, start_x:start_x + crop_size]
-
-        # 5. 强制缩放
-        if crop_size != TARGET_SIZE:
-            final_img = cv2.resize(square, (TARGET_SIZE, TARGET_SIZE), interpolation=cv2.INTER_LINEAR)
-        else:
-            final_img = square
-
-        # 6. 重命名为标准格式
-        standard_name = f"{idx:06d}.png"
-        save_path = os.path.join(out_img_dir, standard_name)
-
-        if not cv2.imwrite(save_path, final_img):
-            print(f"❌ 写入失败: {save_path}");
-            return False
-
+    for idx, fpath in enumerate(files):
+        img = cv2.imread(fpath)
+        cv2.imwrite(os.path.join(img_dest_dir, f"{idx:06d}.png"), img)
         frames.append({
-            "file_path": f"./images/{os.path.splitext(standard_name)[0]}",
+            "file_path": f"./images/{idx:06d}",
             "time": float(idx) / len(files),
-            "transform_matrix": np.eye(4).tolist()
+            "transform_matrix": c2w
         })
 
-    # 生成 JSON
-    fl_px = 1280 / (2 * np.tan(np.radians(70) / 2))
-    new_fov = 2 * np.arctan(TARGET_SIZE / (2 * fl_px))
+    orig_fov = 0.7
+    fl_px = TARGET_SIZE / (2 * np.tan(orig_fov / 2))
 
-    meta = {
-        "camera_angle_x": new_fov,
-        "fl_x": fl_px, "fl_y": fl_px,
+    meta_train = {
+        "camera_angle_x": orig_fov, "fl_x": fl_px, "fl_y": fl_px,
         "cx": TARGET_SIZE / 2, "cy": TARGET_SIZE / 2,
-        "w": TARGET_SIZE, "h": TARGET_SIZE,
-        "frames": frames
+        "w": TARGET_SIZE, "h": TARGET_SIZE, "frames": frames
     }
 
-    for s in ["train", "test", "val"]:
-        with open(os.path.join(output_dir, f"transforms_{s}.json"), 'w') as f:
-            json.dump(meta, f, indent=4)
+    meta_eval = meta_train.copy()
+    meta_eval["frames"] = frames[::12][:5]
+
+    for split, data in [("train", meta_train), ("test", meta_eval), ("val", meta_eval)]:
+        with open(os.path.join(output_dir, f"transforms_{split}.json"), 'w') as f:
+            json.dump(data, f, indent=4)
 
     return True
 
 
-def generate_clean_config(output_dir):
-    """
-    生成配置文件，彻底移除 model 字段
-    """
-    new_cfg_path = os.path.join(output_dir, "run_config.yaml")
-    safe_datadir = output_dir.replace("\\", "/")  # 路径清洗
-
-    print(f"🔥 [2/3] 生成全新配置文件 (无 model 字段)...")
-
-    # 🔥🔥🔥 核心修改：删除了 model: 那两行 🔥🔥🔥
-    config_content = f"""
-data:
-  datadir: "{safe_datadir}"
-  datasampler_type: "rays"
-  downsample: 2.0
-
-optim:
-  n_iters: 3000
-  batch_size: 4096
-"""
-    try:
-        with open(new_cfg_path, 'w', encoding='utf-8') as f:
-            f.write(config_content)
-        print(f"✅ 配置文件已生成: {new_cfg_path}")
-        return new_cfg_path
-    except Exception as e:
-        print(f"❌ 配置文件生成失败: {e}")
-        return None
-
-
 def run(target_dir):
     target_dir = os.path.abspath(target_dir)
-    exp_name = os.path.basename(target_dir)
-    timestamp = datetime.datetime.now().strftime("%H%M%S")
-    output_dir = os.path.join(target_dir, f"hexplane_run_{timestamp}")
+    timestamp = datetime.datetime.now().strftime("%m%d_%H%M%S")
+    exp_name = f"HEX_{timestamp}"
+    output_dir = os.path.join(target_dir, f"hex_data_{timestamp}")
+    os.makedirs(output_dir, exist_ok=True)
 
-    print(f"🚀 创建环境: {output_dir}")
+    if not build_metadata(target_dir, output_dir): return
 
-    # 1. 生成数据
-    if not process_images_internally(target_dir, output_dir):
-        return
+    cfg_path = os.path.join(output_dir, "run_config.yaml").replace('\\', '/')
+    config_content = f"""
+data:
+  datadir: "{output_dir.replace('\\', '/')}"
+  dataset_name: "dnerf"
+  downsample: 1.0
+render_only: False
+systems:
+  ckpt: null
+optim:
+  n_iters: 3000      
+  batch_size: 1024    
+"""
+    with open(cfg_path, 'w') as f:
+        f.write(config_content)
 
-    # 2. 生成全新配置
-    clean_config_path = generate_clean_config(output_dir)
-    if not clean_config_path:
-        return
+    print(f"🚀 [Bridge] 开启 4D 隐式场核心训练...", flush=True)
 
-    print(f"🔥 [3/3] 启动训练...")
+    cmd = [
+        HEXPLANE_PYTHON, "-u", "main.py",
+        f"config={cfg_path}", f"expname={exp_name}",
+        "systems.ckpt=null", "render_only=False"
+    ]
+    env = os.environ.copy()
+    env["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 
-    cmd_list = [
-        "cmd", "/k",
-        HEXPLANE_PYTHON, "main.py",
-        f"config={clean_config_path}",
-        f"expname={exp_name}_{timestamp}"
+    process = subprocess.Popen(
+        cmd, cwd=HEXPLANE_CODE_DIR, env=env,
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, bufsize=0
+    )
+    while True:
+        char = process.stdout.read(1)
+        if not char and process.poll() is not None: break
+        if char:
+            char_str = char.decode('utf-8', 'replace')
+            if char_str == '\r':
+                sys.stdout.write('\n')
+            else:
+                sys.stdout.write(char_str)
+            sys.stdout.flush()
+
+    print(f"\n🚀 [Bridge] 训练完成！正在将神经网络“烘焙”为 4D 光场矩阵 (约需3-5分钟)...", flush=True)
+
+    matrix_frames = []
+    V_STEPS = 36
+    T_STEPS = 30
+
+    for t_idx in range(T_STEPS):
+        t_val = t_idx / max(1, (T_STEPS - 1))
+        for v_idx in range(V_STEPS):
+            angle = np.radians(v_idx * 10)
+            c, s = float(np.cos(angle)), float(np.sin(angle))
+            c2w = [
+                [c, 0, s, 3.0 * s],
+                [0, 1, 0, 0],
+                [-s, 0, c, 3.0 * c],
+                [0, 0, 0, 1]
+            ]
+            matrix_frames.append({
+                "file_path": f"./images/000000",  # 🔥 致命修复：强行借用存在的第0帧图片骗过 DataLoader，防止其崩溃！
+                "time": float(t_val),
+                "transform_matrix": c2w
+            })
+
+    with open(os.path.join(output_dir, "transforms_test.json"), 'r') as f:
+        meta_eval = json.load(f)
+    meta_eval["frames"] = matrix_frames
+    with open(os.path.join(output_dir, "transforms_test.json"), 'w') as f:
+        json.dump(meta_eval, f, indent=4)
+
+    ckpt_rel_path = f"log/{exp_name}/{exp_name}.th"
+
+    render_cmd = [
+        HEXPLANE_PYTHON, "-u", "main.py",
+        f"config={cfg_path}", f"expname={exp_name}",
+        "render_only=True", "render_test=True",
+        f"systems.ckpt={ckpt_rel_path}"
     ]
 
-    subprocess.Popen(
-        cmd_list,
-        cwd=HEXPLANE_CODE_DIR,
-        creationflags=subprocess.CREATE_NEW_CONSOLE
+    render_process = subprocess.Popen(
+        render_cmd, cwd=HEXPLANE_CODE_DIR, env=env,
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, bufsize=0
     )
-    print("✅ 窗口已弹出！祝你好运！")
+    while True:
+        char = render_process.stdout.read(1)
+        if not char and render_process.poll() is not None: break
+        if char:
+            char_str = char.decode('utf-8', 'replace')
+            if char_str == '\r':
+                sys.stdout.write('\n')
+            else:
+                sys.stdout.write(char_str)
+            sys.stdout.flush()
+
+    res_dir = os.path.join(HEXPLANE_CODE_DIR, "log", exp_name, "imgs_test_all").replace('\\', '/')
+    print(f"\n🏁 [RESULT_PATH]:{res_dir}", flush=True)
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--target", required=True)
-    args = parser.parse_args()
-    run(args.target)
+    run(parser.parse_args().target)

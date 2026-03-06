@@ -1,76 +1,86 @@
 import cv2
 import numpy as np
+from collections import deque
 
 
 class PseudoEventGen:
-    def __init__(self, width, height, threshold=20):
+    def __init__(self, width, height):
         self.w = width
         self.h = height
 
-        # === 快速预览版状态 (Lite) ===
-        self.prev_fast = None
+        # [核心优化] N 帧延迟队列
+        # 我们抛弃所有花里胡哨的背景建模，回归你初版最稳定的“帧差法”。
+        # 这里的 6 代表比较当前帧与 6 帧前的画面。
+        # 延迟越大，越能捕捉极慢的动作；且完全不会增加噪点！
+        self.delay_frames = 6
+        self.fast_queue = deque(maxlen=self.delay_frames)
+        self.hq_queue = deque(maxlen=self.delay_frames)
 
-        # === 满血录制版状态 (HQ) ===
-        self.prev_hq = None
-        # 去噪核：用于过滤孤立的事件噪点
-        self.hq_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
+        # 强力物理去噪核：专门消灭孤立的雪花噪点
+        self.noise_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
+
+        # 运动余辉图 (Time Surface)
+        self.trail_fast = np.zeros((self.h, self.w), dtype=np.float32)
+        self.trail_hq = np.zeros((self.h, self.w), dtype=np.float32)
 
     def process_fast(self, current_frame):
-        """
-        [预览流] 极速线性差分
-        用途：实时屏幕显示、运动检测触发
-        特点：计算极快(<1ms)，但噪点较多
-        """
-        curr = current_frame.astype(np.int16)
+        # 1. 空间降噪：提前抹平传感器的高频底噪
+        curr_blur = cv2.GaussianBlur(current_frame, (5, 5), 0).astype(np.int16)
 
-        if self.prev_fast is None:
-            self.prev_fast = curr
+        # 将当前帧塞入队列
+        self.fast_queue.append(curr_blur)
+
+        # 如果队列没满（刚启动的前几帧），先不输出
+        if len(self.fast_queue) < self.delay_frames:
             return np.zeros((self.h, self.w), dtype=np.uint8)
 
-        diff = curr - self.prev_fast
-        self.prev_fast = curr
+        # 2. 延迟帧差：当前帧 - 6帧前的老画面
+        # 完美兼顾了初版的“零噪点”和“慢动作捕捉”！
+        diff = np.abs(curr_blur - self.fast_queue[0])
 
+        # 3. 干净利落的硬阈值截断（像初版一样抗干扰）
         mask = np.zeros((self.h, self.w), dtype=np.uint8)
-        mask[np.abs(diff) > 25] = 255
-        return mask
+        mask[diff > 20] = 255  # 20 是过滤环境微光闪烁的绝佳阈值
+
+        # 4. 形态学开运算：把漏网的单像素噪点直接抹除
+        clean_mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, self.noise_kernel)
+
+        # 5. DVS 拖尾余辉：让线框变实心面，利于目标检测器稳定红框
+        # 每次衰减 50，大约 5 帧后残影消失，非常干脆
+        self.trail_fast = np.maximum(0, self.trail_fast - 50.0)
+        self.trail_fast[clean_mask > 0] = 255.0
+
+        final_mask = np.zeros((self.h, self.w), dtype=np.uint8)
+        final_mask[self.trail_fast > 50] = 255
+
+        return final_mask
 
     def process_hq(self, current_frame):
-        """
-        [生产流] 满血对数域模拟 (Full-Blooded)
-        用途：HexPlane 训练数据生成
-        特点：
-        1. Log 变换：模拟真实事件相机对光照的非线性响应
-        2. 物理阈值：模拟 C 参数
-        3. 形态学去噪：提供干净的边缘特征
-        """
-        # 转为浮点并加1防止log(0)
+        # 生产环境的 Log 域满血版，同样适用该延迟队列逻辑
         curr_float = current_frame.astype(np.float32) + 1.0
+        curr_blur = cv2.GaussianBlur(curr_float, (5, 5), 0)
+        curr_log = np.log(curr_blur)
 
-        if self.prev_hq is None:
-            self.prev_hq = curr_float
+        self.hq_queue.append(curr_log)
+        if len(self.hq_queue) < self.delay_frames:
             return np.zeros((self.h, self.w), dtype=np.uint8)
 
-        # 1. 对数域变换 (Log Domain)
-        # 真实事件相机感知的是亮度的对比度变化 (Log差)，而不是绝对差
-        curr_log = np.log(curr_float)
-        prev_log = np.log(self.prev_hq)
+        diff = np.abs(curr_log - self.hq_queue[0])
 
-        # 2. 计算变化率
-        diff = curr_log - prev_log
-        self.prev_hq = curr_float
+        mask = np.zeros((self.h, self.w), dtype=np.uint8)
+        # 真实事件相机 C 参数阈值
+        mask[diff > 0.15] = 255
 
-        # 3. 物理阈值 (Sensitivity)
-        # 0.15 大约对应 15% 的亮度变化，是常用的事件相机阈值
-        evt_mask = np.zeros((self.h, self.w), dtype=np.uint8)
-        evt_mask[np.abs(diff) > 0.15] = 255
+        clean_mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, self.noise_kernel)
 
-        # 4. 强力去噪 (Denoise)
-        # 消除传感器热噪声产生的孤立白点，保证HexPlane学到的是物体轮廓
-        clean_mask = cv2.morphologyEx(evt_mask, cv2.MORPH_OPEN, self.hq_kernel)
+        self.trail_hq = np.maximum(0, self.trail_hq - 50.0)
+        self.trail_hq[clean_mask > 0] = 255.0
 
-        return clean_mask
+        final_mask = np.zeros((self.h, self.w), dtype=np.uint8)
+        final_mask[self.trail_hq > 50] = 255
+
+        return final_mask
 
     def reset(self):
-        """ 每次开始录制时重置状态，防止上一段录制的残影 """
-        self.prev_fast = None
-        self.prev_hq = None
+        # 坚决不粗暴清空，防止切换检测状态时出现“闪黑”
+        pass
