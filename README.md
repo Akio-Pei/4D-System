@@ -63,5 +63,11 @@ python main.py
 - [ ] **Algorithm Update:** Implementing the $\mathcal{L}_{event}$ sharpening loss function in the PyTorch backend.
 
 ---
+#### 2026.3.21
+
+![](.\images\2026.3.21.png)
+
+
+
 **Author:** Jiahao PEI  
 **Contact:** 18638256716@163.com | [GitHub Link]

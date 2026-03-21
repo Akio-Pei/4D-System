@@ -110,11 +110,12 @@ optim:
                 sys.stdout.write(char_str)
             sys.stdout.flush()
 
-    print(f"\n🚀 [Bridge] 训练完成！正在将神经网络“烘焙”为 4D 光场矩阵 (约需3-5分钟)...", flush=True)
+    # 🔥 满血版 1080 帧矩阵生成逻辑
+    print(f"\n🚀 [Bridge] 训练完成！正在将神经网络“烘焙”为 4D 光场矩阵 (共 1080 帧)...", flush=True)
 
     matrix_frames = []
-    V_STEPS = 36
-    T_STEPS = 30
+    V_STEPS = 36  # 每 10 度转一圈，共 36 个视角
+    T_STEPS = 30  # 均分 30 个时间步
 
     for t_idx in range(T_STEPS):
         t_val = t_idx / max(1, (T_STEPS - 1))
@@ -128,7 +129,7 @@ optim:
                 [0, 0, 0, 1]
             ]
             matrix_frames.append({
-                "file_path": f"./images/000000",  # 🔥 致命修复：强行借用存在的第0帧图片骗过 DataLoader，防止其崩溃！
+                "file_path": f"./images/000000",
                 "time": float(t_val),
                 "transform_matrix": c2w
             })
@@ -139,13 +140,27 @@ optim:
     with open(os.path.join(output_dir, "transforms_test.json"), 'w') as f:
         json.dump(meta_eval, f, indent=4)
 
-    ckpt_rel_path = f"log/{exp_name}/{exp_name}.th"
+    # 🟢 终极补丁：全盘递归搜索权重文件，拒绝盲猜路径！
+    log_base_dir = os.path.join(HEXPLANE_CODE_DIR, "log")
+    ckpt_files = glob.glob(os.path.join(log_base_dir, "**", "*.th"), recursive=True)
+
+    actual_ckpt_path = None
+    for f in ckpt_files:
+        if exp_name in f:
+            actual_ckpt_path = f
+            break
+
+    if not actual_ckpt_path:
+        print(f"\n❌ 找不到包含 {exp_name} 的权重文件！请检查 HexPlane 的 log 目录。", flush=True)
+        return
+
+    print(f"\n✅ 自动定位到模型权重: {actual_ckpt_path}", flush=True)
 
     render_cmd = [
         HEXPLANE_PYTHON, "-u", "main.py",
         f"config={cfg_path}", f"expname={exp_name}",
         "render_only=True", "render_test=True",
-        f"systems.ckpt={ckpt_rel_path}"
+        f"systems.ckpt={actual_ckpt_path}"
     ]
 
     render_process = subprocess.Popen(
@@ -163,8 +178,27 @@ optim:
                 sys.stdout.write(char_str)
             sys.stdout.flush()
 
-    res_dir = os.path.join(HEXPLANE_CODE_DIR, "log", exp_name, "imgs_test_all").replace('\\', '/')
-    print(f"\n🏁 [RESULT_PATH]:{res_dir}", flush=True)
+    # 🟢 动态锁定图片渲染目录（紧跟模型所在的同级目录），然后烘焙为丝滑 60FPS
+    exp_log_dir = os.path.dirname(actual_ckpt_path)
+    res_dir = os.path.join(exp_log_dir, "imgs_test_all")
+
+    img_files = sorted(glob.glob(os.path.join(res_dir, "*.png")))
+    if img_files:
+        print(f"\n🎬 [Video Engine] 正在将 {len(img_files)} 帧序列合成 60FPS MP4 视频...", flush=True)
+        first_img = cv2.imread(img_files[0])
+        h, w = first_img.shape[:2]
+
+        out_video_path = os.path.join(target_dir, f"hexplane_60fps_{timestamp}.mp4")
+
+        # 使用 MP4V 编码，兼容性极好
+        fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+        out_vid = cv2.VideoWriter(out_video_path, fourcc, 60.0, (w, h))
+        for img_path in img_files:
+            out_vid.write(cv2.imread(img_path))
+        out_vid.release()
+        print(f"✅ 视频烘焙完成！已存至: {out_video_path}", flush=True)
+    else:
+        print(f"⚠️ 未找到渲染出的图片，检查 {res_dir}", flush=True)
 
 
 if __name__ == "__main__":

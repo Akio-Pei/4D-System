@@ -7,13 +7,26 @@ import datetime
 import subprocess
 import sys
 import glob
+
+# 🔥 终极补丁：把 CUDA DLL 路径强行塞入全局
+CUDA_BIN_PATH = r"D:\NVIDIA\V12.6\bin"
+if os.path.exists(CUDA_BIN_PATH):
+    try:
+        os.add_dll_directory(CUDA_BIN_PATH)
+    except Exception:
+        pass
+
 from PyQt6.QtWidgets import (QMainWindow, QWidget, QHBoxLayout, QVBoxLayout, QPushButton,
                              QGridLayout, QLabel, QTextEdit, QSizePolicy, QSlider, QMessageBox,
                              QFileDialog, QGroupBox, QSpinBox, QComboBox, QProgressBar)
 from PyQt6.QtCore import Qt, pyqtSlot, QRect, pyqtSignal, QProcess, QTimer
 from PyQt6.QtGui import QPainter, QColor, QPen, QImage, QPixmap, QFont, QIcon
-from core.data_link import DataReceiver
-from core.sync_engine import SyncEngine
+
+try:
+    from core.data_link import DataReceiver
+    from core.sync_engine import SyncEngine
+except ImportError:
+    pass
 
 try:
     from config import PORT_VIDEO, PORT_THERMAL
@@ -22,34 +35,34 @@ except ImportError:
 
 TRANS = {
     "EN": {
-        "title": "ELL-4D Reconstruction Terminal",
+        "title": "MET-4DGS Reconstruction Terminal (Dual-Core Edition)",
         "btn_start": "SYSTEM START", "btn_stop": "SYSTEM HALT",
         "mode_locked": "MODE: LOCKED", "mode_adjust": "MODE: ADJUST",
         "check": "CHECKER PATTERN", "rot": "ROTATION", "scale": "SCALE",
         "x_crs": "X-CRS", "x_fin": "X-FIN", "y_crs": "Y-CRS", "y_fin": "Y-FIN",
-        "lang": "LANG: EN", "gen_4d": "RUN HEXPLANE BRIDGE",
-        "load_4d": "LOAD 4D MATRIX",
-        "exit_4d": "EXIT 4D PREVIEW",
+        "lang": "LANG: EN",
+        "gen_hex": "1. TRAIN HEXPLANE", "play_hex": "PLAY HEX 60FPS VIDEO",
+        "gen_4dgs": "2. TRAIN MET-4DGS", "load_4dgs": "OPEN 4DGS VIEWER",
         "time_lbl": "TIME:",
         "hud_main": "FUSION OPTIC", "hud_sub1": "THERMAL SENSOR", "hud_sub2": "EVENT TRACKER",
         "hud_roi": "TARGET ROI", "hud_depth": "ROUGH 4D DEPTH",
-        "grp_net": "NETWORK CONFIG", "grp_align": "TACTICAL ALIGNMENT", "grp_sys": "SYSTEM CORE",
+        "grp_net": "NETWORK CONFIG", "grp_align": "TACTICAL ALIGNMENT", "grp_sys": "PIPELINE CONTROLLER",
         "grp_det": "SENSITIVITY & TRIGGER",
         "t_sens": "T-SENS:", "e_sens": "E-SENS:", "cool": "COOLDOWN:", "trg": "REC TRG:"
     },
     "CN": {
-        "title": "极弱光4D重建终端",
+        "title": "多模态 4DGS 极弱光重建系统 (双核引擎终极版)",
         "btn_start": "系统启动", "btn_stop": "系统终止",
         "mode_locked": "模式: 锁定", "mode_adjust": "模式: 校准",
         "check": "棋盘对比", "rot": "旋转修正", "scale": "缩放调整",
         "x_crs": "水平粗调", "x_fin": "水平精调", "y_crs": "垂直粗调", "y_fin": "垂直精调",
-        "lang": "语言: 中文", "gen_4d": "一键重建并烘焙 4D 场",
-        "load_4d": "加载时空光场矩阵",
-        "exit_4d": "退出 4D 预览",
+        "lang": "语言: 中文",
+        "gen_hex": "1. 训练 HexPlane", "play_hex": "播放 HexPlane 60帧视频",
+        "gen_4dgs": "2. 训练 MET-4DGS", "load_4dgs": "启动实时 4D 交互引擎",
         "time_lbl": "时间轴:",
         "hud_main": "融合主视野", "hud_sub1": "热成像传感器", "hud_sub2": "事件流传感器",
         "hud_roi": "目标特写", "hud_depth": "实时4D预览",
-        "grp_net": "多路网口配置", "grp_align": "光轴校准面板", "grp_sys": "系统核心控制",
+        "grp_net": "多路网口配置", "grp_align": "光轴校准面板", "grp_sys": "全链路引擎控制",
         "grp_det": "目标检测与触发",
         "t_sens": "热阈值:", "e_sens": "事件域:", "cool": "冷却(帧):", "trg": "触发逻辑:"
     }
@@ -154,16 +167,6 @@ class MainWindow(QMainWindow):
         self._last_vals = {"x_crs": 0, "x_fin": 0, "y_crs": 0, "y_fin": 0}
         self.bridge_phase = 0
 
-        self.matrix_frames = []
-        self.is_matrix_mode = False
-        self.curr_t = 0
-        self.curr_v = 0
-        self.drag_acc_x = 0
-        self.drag_acc_y = 0
-
-        self.play_timer = QTimer(self)
-        self.play_timer.timeout.connect(self.play_next_frame)
-
         if os.path.exists("images/logo.ico"): self.setWindowIcon(QIcon("images/logo.ico"))
         self.setWindowTitle(TRANS[self.cur_lang]["title"])
         self.resize(1600, 900)
@@ -181,37 +184,13 @@ class MainWindow(QMainWindow):
         main_layout.setSpacing(10)
 
         left_panel = QWidget()
-        left_layout = QVBoxLayout(left_panel)
-        left_layout.setContentsMargins(0, 0, 0, 0)
+        left_layout = QVBoxLayout(left_panel);
+        left_layout.setContentsMargins(0, 0, 0, 0);
         left_layout.setSpacing(5)
-
         self.hud_main = HUDDisplay("hud_main", "#00ff00", True, "SYSTEM OFFLINE")
         self.hud_main.clicked.connect(self.handle_swap);
         self.hud_main.dragged.connect(self.handle_drag)
         left_layout.addWidget(self.hud_main, 1)
-
-        self.player_ctrl_widget = QWidget()
-        ctrl_layout = QHBoxLayout(self.player_ctrl_widget)
-        ctrl_layout.setContentsMargins(5, 5, 5, 5)
-
-        self.lbl_time = QLabel("TIME:")
-        self.lbl_time.setStyleSheet("color: #00ffcc; font-weight: bold;")
-        self.sld_time = QSlider(Qt.Orientation.Horizontal)
-        self.sld_time.setRange(0, 29)
-        self.sld_time.valueChanged.connect(self.on_time_slider_changed)
-
-        self.btn_exit_preview = QPushButton("EXIT 4D PREVIEW")
-        self.btn_exit_preview.setStyleSheet(
-            "background:#440000; color:#ff3333; border:1px solid #ff3333; padding: 6px 12px;")
-        self.btn_exit_preview.clicked.connect(self.exit_4d_preview)
-
-        ctrl_layout.addWidget(self.lbl_time)
-        ctrl_layout.addWidget(self.sld_time, 1)
-        ctrl_layout.addWidget(self.btn_exit_preview)
-
-        self.player_ctrl_widget.setVisible(False)
-        left_layout.addWidget(self.player_ctrl_widget, 0)
-
         main_layout.addWidget(left_panel, 65)
 
         right_panel = QWidget();
@@ -314,12 +293,14 @@ class MainWindow(QMainWindow):
         self.lbl_rot = QLabel("ROT");
         self.sld_rot = QSlider(Qt.Orientation.Horizontal);
         self.sld_rot.setRange(-20, 20);
-        self.sld_rot.valueChanged.connect(lambda v: self.eng.update_align_params(set_angle=v))
+        self.sld_rot.valueChanged.connect(
+            lambda v: self.eng.update_align_params(set_angle=v) if hasattr(self, 'eng') else None)
         self.lbl_sc = QLabel("SCALE");
         self.sld_sc = QSlider(Qt.Orientation.Horizontal);
         self.sld_sc.setRange(5, 50);
         self.sld_sc.setValue(25);
-        self.sld_sc.valueChanged.connect(lambda v: self.eng.update_align_params(set_scale=v / 10.0))
+        self.sld_sc.valueChanged.connect(
+            lambda v: self.eng.update_align_params(set_scale=v / 10.0) if hasattr(self, 'eng') else None)
         ag.addWidget(self.lbl_rot, 5, 0);
         ag.addWidget(self.sld_rot, 5, 1);
         ag.addWidget(self.lbl_sc, 6, 0);
@@ -332,28 +313,38 @@ class MainWindow(QMainWindow):
         self.log_v.setFixedHeight(50)
         r_layout.addWidget(self.log_v, 0)
 
-        self.grp_sys = QGroupBox("SYSTEM CORE");
+        self.grp_sys = QGroupBox("PIPELINE CONTROLLER")
         sys_lay = QVBoxLayout(self.grp_sys);
         sys_lay.setContentsMargins(10, 10, 10, 10);
         sys_lay.setSpacing(6)
+
         self.prog_gen = QProgressBar();
         self.prog_gen.setRange(0, 100);
         self.prog_gen.setValue(0);
         self.prog_gen.hide()
         sys_lay.addWidget(self.prog_gen)
 
-        btn_row = QHBoxLayout()
-        self.btn_gen = QPushButton("RUN HEXPLANE BRIDGE");
-        self.btn_gen.setStyleSheet("background:#442200; color:#fa0; padding:8px; border:1px solid #fa0;")
-        self.btn_gen.clicked.connect(self.generate_4d)
+        btn_grid = QGridLayout()
+        self.btn_gen_hex = QPushButton("1. TRAIN HEXPLANE");
+        self.btn_gen_hex.setStyleSheet("background:#332200; color:#aa8800; padding:6px; border:1px solid #aa8800;")
+        self.btn_gen_hex.clicked.connect(self.generate_hexplane)
+        self.btn_play_hex = QPushButton("PLAY HEX 60FPS VIDEO");
+        self.btn_play_hex.setStyleSheet("background:#443300; color:#fd0; padding:6px; border:1px solid #fd0;")
+        self.btn_play_hex.clicked.connect(self.play_hexplane_video)
 
-        self.btn_load_4d = QPushButton("LOAD 4D MATRIX");
-        self.btn_load_4d.setStyleSheet("background:#003366; color:#0af; padding:8px; border:1px solid #0af;")
-        self.btn_load_4d.clicked.connect(self.load_local_4d)
+        self.btn_gen_4dgs = QPushButton("2. TRAIN MET-4DGS");
+        self.btn_gen_4dgs.setStyleSheet(
+            "background:#440044; color:#ff00ff; padding:6px; font-weight:bold; border:1px solid #ff00ff;")
+        self.btn_gen_4dgs.clicked.connect(self.generate_4dgs)
+        self.btn_load_4dgs = QPushButton("OPEN 4DGS VIEWER");
+        self.btn_load_4dgs.setStyleSheet("background:#003366; color:#0af; padding:6px; border:1px solid #0af;")
+        self.btn_load_4dgs.clicked.connect(self.launch_4dgs_viewer)
 
-        btn_row.addWidget(self.btn_gen)
-        btn_row.addWidget(self.btn_load_4d)
-        sys_lay.addLayout(btn_row)
+        btn_grid.addWidget(self.btn_gen_hex, 0, 0);
+        btn_grid.addWidget(self.btn_play_hex, 0, 1)
+        btn_grid.addWidget(self.btn_gen_4dgs, 1, 0);
+        btn_grid.addWidget(self.btn_load_4dgs, 1, 1)
+        sys_lay.addLayout(btn_grid)
 
         bot_row = QHBoxLayout();
         bot_row.setSpacing(4)
@@ -395,23 +386,37 @@ class MainWindow(QMainWindow):
             sld.blockSignals(False)
         for k in self._last_vals: self._last_vals[k] = 0
 
-    def generate_4d(self):
+    def generate_hexplane(self):
         d_dir = os.path.join(os.getcwd(), "auto_captures")
         if not os.path.exists(d_dir): os.makedirs(d_dir, exist_ok=True)
-        t_dir = QFileDialog.getExistingDirectory(self, "Select Recorded Data Folder", d_dir)
+        t_dir = QFileDialog.getExistingDirectory(self, "Select Recorded Data Folder for HexPlane", d_dir)
         if t_dir:
-            if not os.path.exists("tools/bridge.py"): return QMessageBox.critical(self, "Error",
-                                                                                  "Missing tools/bridge.py!")
-            self.btn_gen.setDisabled(True);
+            self.lock_buttons();
             self.prog_gen.show();
             self.prog_gen.setValue(0)
-            self.bridge_phase = 0;
-            self.log_msg(">>> ESTABLISHING HEXPLANE PIPELINE...")
+            self.log_msg(">>> ESTABLISHING HEXPLANE BASELINE...")
             self.bridge_process = QProcess(self)
             self.bridge_process.setProcessChannelMode(QProcess.ProcessChannelMode.MergedChannels)
             self.bridge_process.readyReadStandardOutput.connect(self.handle_bridge_output)
-            self.bridge_process.finished.connect(self.handle_bridge_finished)
+            self.bridge_process.finished.connect(self.unlock_buttons)
             self.bridge_process.start(sys.executable, ["tools/bridge.py", "--target", t_dir])
+
+    def generate_4dgs(self):
+        d_dir = os.path.join(os.getcwd(), "auto_captures")
+        if not os.path.exists(d_dir): os.makedirs(d_dir, exist_ok=True)
+        t_dir = QFileDialog.getExistingDirectory(self, "Select Recorded Data for MET-4DGS", d_dir)
+        if t_dir:
+            if not os.path.exists("tools/bridge_4dgs.py"): return QMessageBox.critical(self, "Error",
+                                                                                       "Missing tools/bridge_4dgs.py! Please create the script.")
+            self.lock_buttons();
+            self.prog_gen.show();
+            self.prog_gen.setValue(0)
+            self.log_msg(">>> IGNITING MET-4DGS PIPELINE...")
+            self.bridge_process = QProcess(self)
+            self.bridge_process.setProcessChannelMode(QProcess.ProcessChannelMode.MergedChannels)
+            self.bridge_process.readyReadStandardOutput.connect(self.handle_bridge_output)
+            self.bridge_process.finished.connect(self.unlock_buttons)
+            self.bridge_process.start(sys.executable, ["tools/bridge_4dgs.py", "--target", t_dir])
 
     def handle_bridge_output(self):
         raw_bytes = self.bridge_process.readAllStandardOutput().data()
@@ -423,165 +428,57 @@ class MainWindow(QMainWindow):
             if not line: continue
             clean_line = ansi_escape.sub('', line)
 
-            if "[RESULT_PATH]:" in clean_line:
-                self.rendered_path = clean_line.split("[RESULT_PATH]:")[-1].strip()
+            match_hex = re.search(r'(\d+)/3000', clean_line)
+            match_gs = re.search(r'(\d+)/7000', clean_line)
+            match_render = re.search(r'(\d+)/1080', clean_line)
 
-            if "[1/3]" in clean_line:
-                self.bridge_phase = 1; self.prog_gen.setValue(5)
-            elif "[2/3]" in clean_line:
-                self.bridge_phase = 2; self.prog_gen.setValue(25)
-            elif "核心训练" in clean_line:
-                self.bridge_phase = 3; self.prog_gen.setValue(30)
-            elif "烘焙" in clean_line:
-                self.bridge_phase = 4; self.prog_gen.setValue(85)
-
-            if self.bridge_phase == 3:
-                match = re.search(r'(\d+)/3000', clean_line)
-                if match:
-                    self.prog_gen.setValue(30 + int((int(match.group(1)) / 3000.0) * 55))
-                    self.btn_gen.setText(f"TRAINING... {match.group(1)}/3000")
-            elif self.bridge_phase == 4:
-                # 🔥 实时解析烘焙 1080 帧的进度，不再“假死”
-                match = re.search(r'(\d+)/1080', clean_line)
-                if match:
-                    self.prog_gen.setValue(85 + int((int(match.group(1)) / 1080.0) * 15))
-                    self.btn_gen.setText(f"BAKING MATRIX... {match.group(1)}/1080")
+            if match_hex:
+                self.prog_gen.setValue(int((int(match_hex.group(1)) / 3000.0) * 100))
+            elif match_gs:
+                self.prog_gen.setValue(int((int(match_gs.group(1)) / 7000.0) * 100))
+            elif match_render:
+                self.prog_gen.setValue(int((int(match_render.group(1)) / 1080.0) * 100))
 
             if "it/s" not in clean_line and "s/it" not in clean_line and "%|" not in clean_line:
                 self.log_msg(clean_line)
 
-    def handle_bridge_finished(self):
-        self.btn_gen.setEnabled(True);
-        self.btn_gen.setText(TRANS[self.cur_lang]["gen_4d"])
+    def lock_buttons(self):
+        self.btn_gen_hex.setDisabled(True);
+        self.btn_gen_4dgs.setDisabled(True)
+
+    def unlock_buttons(self):
+        self.btn_gen_hex.setEnabled(True);
+        self.btn_gen_4dgs.setEnabled(True)
         self.prog_gen.setValue(100)
-        self.log_msg(">>> HEXPLANE PIPELINE COMPLETED.")
+        self.log_msg(">>> PIPELINE COMPLETED.")
 
-        if hasattr(self, 'rendered_path') and os.path.exists(self.rendered_path):
-            self.load_rendered_4d(self.rendered_path)
+    def play_hexplane_video(self):
+        video_path, _ = QFileDialog.getOpenFileName(self, "Select HexPlane 60FPS MP4", os.getcwd(), "Videos (*.mp4)")
+        if video_path:
+            self.log_msg(f"▶️ Playing HexPlane Video: {os.path.basename(video_path)}")
+            os.startfile(video_path)
 
-    def load_local_4d(self):
-        base_log_dir = r"D:\CPP\HexPlane\log"
-        if not os.path.exists(base_log_dir): base_log_dir = os.getcwd()
-        folder = QFileDialog.getExistingDirectory(self, "Select 4D Result Folder", base_log_dir)
-        if not folder: return
+    # 🟢 终极寻路：一键定位你的 auto_captures！
+    def launch_4dgs_viewer(self):
+        # 强制默认打开当前工作目录下的 auto_captures 文件夹
+        base_log_dir = os.path.join(os.getcwd(), "auto_captures")
+        if not os.path.exists(base_log_dir): os.makedirs(base_log_dir, exist_ok=True)
 
-        target_sub = None
-        for sub in ["imgs_test_all", "imgs_path_all", "imgs_train_all"]:
-            if os.path.exists(os.path.join(folder, sub)):
-                if glob.glob(os.path.join(folder, sub, "*.png")):
-                    target_sub = os.path.join(folder, sub)
-                    break
-
-        if not target_sub:
-            QMessageBox.warning(self, "Error", "No valid rendered images found in this folder!")
-            return
-
-        self.load_rendered_4d(target_sub)
-
-    def load_rendered_4d(self, path):
-        self.matrix_frames = []
-        files = [f for f in glob.glob(os.path.join(path, "test*.png")) if "_gt" not in f]
-
-        # 🔥 致命排序修复：提取数字进行比较，绝对防止 test1000 排在 test101 前面！
-        def get_idx(f):
-            m = re.search(r'test(\d+)\.png', os.path.basename(f))
-            return int(m.group(1)) if m else 0
-
-        files.sort(key=get_idx)
-
-        if len(files) == 30 * 36:
-            self.is_matrix_mode = True
-            for t in range(30):
-                row = []
-                for v in range(36):
-                    idx = t * 36 + v
-                    img = cv2.imread(files[idx])
-                    row.append(img)
-                self.matrix_frames.append(row)
-
-            self.curr_t, self.curr_v = 0, 0
-            self.log_msg(f"✅ 成功解包时空光场矩阵！({len(files)}帧无损导入)")
-            self.win_state["hud_main"] = "4D_PLAYER"
-            self.hud_main.set_display_name("4D LIGHT FIELD [X-DRAG: 360° | Y-DRAG: TIME]")
-            self.hud_main.color = QColor("#00ffcc")
-
-            self.player_ctrl_widget.setVisible(True)
-            self.sld_time.blockSignals(True)
-            self.sld_time.setValue(0)
-            self.sld_time.blockSignals(False)
-
-            self.play_timer.start(33)
-        else:
-            self.log_msg(f"⚠️ 矩阵数据不完整 (仅找到 {len(files)} 帧)。请点击 RUN 重新训练与烘焙！")
-
-    def on_time_slider_changed(self, val):
-        if not self.is_matrix_mode: return
-        self.play_timer.stop()
-        self.curr_t = val
-        self.hud_main.update_frame(self.matrix_frames[self.curr_t][self.curr_v], "4D_PLAYER", {"rec": ""})
-
-    def exit_4d_preview(self):
-        self.play_timer.stop()
-        self.is_matrix_mode = False
-        self.matrix_frames = []
-        self.player_ctrl_widget.setVisible(False)
-
-        self.win_state["hud_main"] = "FUSION"
-        self.hud_main.color = QColor("#00ff00")
-        self.hud_main.setPixmap(QPixmap())
-        self.update_ui_text()
-        self.log_msg("⏹️ 已退出 4D 预览，返回实时监控模式。")
-
-    @pyqtSlot()
-    def play_next_frame(self):
-        if not self.matrix_frames: return
-        self.curr_t = (self.curr_t + 1) % 30
-
-        self.sld_time.blockSignals(True)
-        self.sld_time.setValue(self.curr_t)
-        self.sld_time.blockSignals(False)
-
-        self.hud_main.update_frame(self.matrix_frames[self.curr_t][self.curr_v], "4D_PLAYER", {"rec": ""})
+        folder = QFileDialog.getExistingDirectory(self, "Select Trained 4DGS Model Folder", base_log_dir)
+        if folder:
+            self.log_msg(f"🚀 LAUNCHING 120FPS 4DGS ENGINE FOR: {os.path.basename(folder)}")
+            viewer_cmd = [sys.executable, "tools/launch_viewer.py", "--model_path", folder]
+            subprocess.Popen(viewer_cmd)
 
     def handle_drag(self, dx, dy):
         c_type = self.win_state["hud_main"]
-        if c_type == "DEPTH":
+        if c_type == "DEPTH" and hasattr(self, 'eng'):
             self.eng.update_depth_rotation(dx, dy)
-        elif c_type == "FUSION" and self.grp_align.isVisible():
+        elif c_type == "FUSION" and self.grp_align.isVisible() and hasattr(self, 'eng'):
             self.eng.update_align_params(dx=dx, dy=dy)
-        elif c_type == "4D_PLAYER":
-            self.play_timer.stop()
-            if self.is_matrix_mode:
-                self.drag_acc_x += dx
-                self.drag_acc_y += dy
-
-                if abs(self.drag_acc_x) > 10:
-                    step = 1 if self.drag_acc_x > 0 else -1
-                    self.curr_v = (self.curr_v + step) % 36
-                    self.drag_acc_x = 0
-
-                if abs(self.drag_acc_y) > 10:
-                    step = 1 if self.drag_acc_y > 0 else -1
-                    self.curr_t = (self.curr_t + step) % 30
-                    self.drag_acc_y = 0
-
-                    self.sld_time.blockSignals(True)
-                    self.sld_time.setValue(self.curr_t)
-                    self.sld_time.blockSignals(False)
-
-                self.hud_main.update_frame(self.matrix_frames[self.curr_t][self.curr_v], "4D_PLAYER", {"rec": ""})
 
     def handle_swap(self, clicked_key):
-        if clicked_key == "hud_main":
-            if self.win_state.get("hud_main") == "4D_PLAYER":
-                if self.play_timer.isActive():
-                    self.play_timer.stop()
-                    self.log_msg("⏸️ 4D 空间已冻结 (鼠标X轴旋转，Y轴回溯时间)")
-                else:
-                    self.play_timer.start(33)
-                    self.log_msg("▶️ 4D 空间恢复演化")
-            return
-
+        if clicked_key == "hud_main": return
         self.win_state["hud_main"], self.win_state[clicked_key] = self.win_state.get(clicked_key), self.win_state[
             "hud_main"]
         self.update_ui_text()
@@ -592,7 +489,7 @@ class MainWindow(QMainWindow):
 
     def update_ui_text(self):
         t = TRANS[self.cur_lang]
-        self.setWindowTitle(t["title"]);
+        self.setWindowTitle(t["title"])
         self.grp_net.setTitle(t["grp_net"]);
         self.grp_align.setTitle(t["grp_align"]);
         self.grp_sys.setTitle(t["grp_sys"]);
@@ -601,16 +498,17 @@ class MainWindow(QMainWindow):
         self.lbl_e_sens.setText(t["e_sens"]);
         self.lbl_cool.setText(t["cool"]);
         self.lbl_trg.setText(t["trg"])
+
+        self.btn_gen_hex.setText(t["gen_hex"]);
+        self.btn_play_hex.setText(t["play_hex"])
+        self.btn_gen_4dgs.setText(t["gen_4dgs"]);
+        self.btn_load_4dgs.setText(t["load_4dgs"])
+
         self.btn_start.setText(t["btn_stop"] if hasattr(self, 'eng') and self.eng.isRunning() else t["btn_start"])
         self.btn_mode.setText(
-            t["mode_adjust"] if self.btn_mode and "ADJUST" in self.btn_mode.text() else t["mode_locked"])
+            t["mode_adjust"] if hasattr(self, 'btn_mode') and "ADJUST" in self.btn_mode.text() else t["mode_locked"])
         self.btn_check.setText(t["check"]);
-        self.btn_lang.setText(t["lang"]);
-        self.btn_gen.setText(t["gen_4d"]);
-        self.btn_load_4d.setText(t["load_4d"])
-
-        self.lbl_time.setText(t["time_lbl"])
-        self.btn_exit_preview.setText(t["exit_4d"])
+        self.btn_lang.setText(t["lang"])
 
         self.lbl_rot.setText(t["rot"].split()[0]);
         self.lbl_sc.setText(t["scale"].split()[0]);
@@ -619,7 +517,6 @@ class MainWindow(QMainWindow):
         self.lbl_y_crs.setText(t["y_crs"].split()[0]);
         self.lbl_y_fin.setText(t["y_fin"].split()[0])
         for hud in [self.hud_main, self.hud_sub1, self.hud_sub2, self.hud_roi, self.hud_depth]:
-            if hud.name_key == "hud_main" and self.win_state.get("hud_main") == "4D_PLAYER": continue
             hud.set_display_name(t.get(hud.name_key, hud.name_key))
 
     def start(self):
@@ -646,7 +543,7 @@ class MainWindow(QMainWindow):
             self.eng = SyncEngine(self.qv, self.qt)
             self.eng.update_signal.connect(self.update_displays);
             self.eng.log_signal.connect(self.log_msg)
-            self.update_det_params();
+            self.update_det_params()
             self.eng.start()
             self.btn_start.setText(TRANS[self.cur_lang]["btn_stop"]);
             self.btn_start.setStyleSheet("background:#660000; color:#f00;")
@@ -665,11 +562,13 @@ class MainWindow(QMainWindow):
         t = TRANS[self.cur_lang]
         is_adj = "ADJUST" in self.btn_mode.text() or "校准" in self.btn_mode.text()
         if is_adj:
-            nm, txt = "LOCKED", t["mode_locked"]; self.grp_align.setVisible(False); self.btn_mode.setStyleSheet(
-                "background:#001122; color:#0af; padding:6px; border:1px solid #005588;")
+            nm, txt = "LOCKED", t["mode_locked"];
+            self.grp_align.setVisible(False);
+            self.btn_mode.setStyleSheet("background:#001122; color:#0af; padding:6px; border:1px solid #005588;")
         else:
-            nm, txt = "ADJUST", t["mode_adjust"]; self.grp_align.setVisible(True); self.btn_mode.setStyleSheet(
-                "background:#332200; color:#fd0; padding:6px; border:1px solid #aa6600;")
+            nm, txt = "ADJUST", t["mode_adjust"];
+            self.grp_align.setVisible(True);
+            self.btn_mode.setStyleSheet("background:#332200; color:#fd0; padding:6px; border:1px solid #aa6600;")
         self.btn_mode.setText(txt);
         self.eng.set_mode(nm)
 
@@ -681,7 +580,6 @@ class MainWindow(QMainWindow):
         try:
             cmap = {"FUSION": fus, "THERMAL": raw_therm, "EVENT": raw_evt, "ROI": roi, "DEPTH": depth}
             for hud_key in ["hud_main", "hud_sub1", "hud_sub2", "hud_roi", "hud_depth"]:
-                if hud_key == "hud_main" and self.win_state.get("hud_main") == "4D_PLAYER": continue
                 getattr(self, hud_key).update_frame(cmap.get(self.win_state.get(hud_key)), self.win_state.get(hud_key),
                                                     info)
         except:
@@ -689,7 +587,9 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, e):
         try:
-            self.eng.stop(); self.th_v.stop(); self.th_t.stop()
+            self.eng.stop();
+            self.th_v.stop();
+            self.th_t.stop()
         except:
             pass
 

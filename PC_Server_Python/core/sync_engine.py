@@ -16,7 +16,6 @@ from algorithms.event_sim import PseudoEventGen
 from core.detector import SentryDetector
 from config import THERMAL_W, THERMAL_H, VIS_W, VIS_H
 
-
 class SyncEngine(QThread):
     update_signal = pyqtSignal(np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, dict)
     log_signal = pyqtSignal(str)
@@ -52,7 +51,6 @@ class SyncEngine(QThread):
 
         self.prev_evt_frame = None
 
-        # 🟢 【核心规则】：标准块大小死死锁定为 60 帧
         self.CHUNK_SIZE = 60
         self.lost_frames = 0
         self.TOLERANCE_FRAMES = 10
@@ -164,11 +162,8 @@ class SyncEngine(QThread):
     def stop_recording(self):
         if not self.is_recording: return
         self.is_recording = False
-
-        # 🟢 如果中途丢失导致不足 60 帧，直接毁尸灭迹
         if self.rec_frame_id < self.CHUNK_SIZE:
-            self.log_signal.emit(
-                f"[REC] DISCARDED: Incomplete chunk ({self.rec_frame_id}/{self.CHUNK_SIZE}). Destroying...")
+            self.log_signal.emit(f"[REC] DISCARDED: Incomplete chunk ({self.rec_frame_id}/{self.CHUNK_SIZE}).")
             self.io_queue.put(("DESTROY_DIR", self.rec_dir))
 
     def get_smart_crop(self, image, box, out_size=(120, 120)):
@@ -254,7 +249,6 @@ class SyncEngine(QThread):
                 v_ts, v_fid, v_raw = self.q_vis.popleft()
 
                 v_corr = self.algo_vign.process(v_raw)
-
                 e_mask_fast = self.algo_evt.process_fast(v_corr)
                 e_mask_clean = self.generate_robust_events(v_corr)
 
@@ -277,9 +271,10 @@ class SyncEngine(QThread):
                 t_temp_rot = self.rotate_image(t_temp_scaled, angle)
                 aligned_temp = np.full((VIS_H, VIS_W), -50.0, dtype=np.float32)
 
-                x1 = max(0, tx);
+                # 🟢 绝对重叠边界锁死逻辑 (Intersection Bounding Box)
+                x1 = max(0, tx)
                 y1 = max(0, ty)
-                x2 = min(VIS_W, tx + tw);
+                x2 = min(VIS_W, tx + tw)
                 y2 = min(VIS_H, ty + th)
                 vw, vh = x2 - x1, y2 - y1
 
@@ -357,49 +352,37 @@ class SyncEngine(QThread):
                     side = max(bw, bh) + pad * 2
                     cx, cy = bx + bw // 2, by + bh // 2
 
-                    x1_c = cx - side // 2;
-                    y1_c = cy - side // 2
-                    x2_c = x1_c + side;
-                    y2_c = y1_c + side
+                    # 🟢 强制锁定坐标在【热力图与可见光交集的有效安全区】内
+                    # x1, y1, x2, y2 是上面计算的热力图像在屏幕上的绝对边界
+                    safe_x1 = max(x1, cx - side // 2)
+                    safe_y1 = max(y1, cy - side // 2)
+                    safe_x2 = min(x2, cx + side // 2)
+                    safe_y2 = min(y2, cy + side // 2)
 
-                    x1_safe = max(0, x1_c);
-                    y1_safe = max(0, y1_c)
-                    x2_safe = min(VIS_W, x2_c);
-                    y2_safe = min(VIS_H, y2_c)
+                    # 避免越界切成非正方形，我们必须算出实际有效的宽高
+                    ew = safe_x2 - safe_x1
+                    eh = safe_y2 - safe_y1
 
-                    if x2_safe > x1_safe and y2_safe > y1_safe:
-                        vis_valid = final_fusion[y1_safe:y2_safe, x1_safe:x2_safe]
-                        therm_valid = aligned_color[y1_safe:y2_safe, x1_safe:x2_safe]
-                        evt_valid = e_mask_clean[y1_safe:y2_safe, x1_safe:x2_safe]
+                    if ew > 0 and eh > 0:
+                        vis_valid = final_fusion[safe_y1:safe_y2, safe_x1:safe_x2]
+                        therm_valid = aligned_color[safe_y1:safe_y2, safe_x1:safe_x2]
+                        evt_valid = e_mask_clean[safe_y1:safe_y2, safe_x1:safe_x2]
 
-                        cvs_vis = np.zeros((side, side, 3), dtype=np.uint8)
-                        cvs_therm = np.zeros((side, side, 3), dtype=np.uint8)
-                        cvs_evt = np.zeros((side, side), dtype=np.uint8)
-
-                        sy = y1_safe - y1_c;
-                        sx = x1_safe - x1_c
-                        eh = y2_safe - y1_safe;
-                        ew = x2_safe - x1_safe
-
-                        cvs_vis[sy:sy + eh, sx:sx + ew] = vis_valid
-                        cvs_therm[sy:sy + eh, sx:sx + ew] = therm_valid
-                        cvs_evt[sy:sy + eh, sx:sx + ew] = evt_valid
-
+                        # 无论切割成了什么长宽比，最后强制拉伸回统一的 TARGET_SIZE (200x200)
+                        # 确保网络吞入的张量永远是不带黑边、100% 对齐的图像
                         TRAIN_SIZE = 200
-                        crop_vis = cv2.resize(cvs_vis, (TRAIN_SIZE, TRAIN_SIZE), interpolation=cv2.INTER_AREA)
-                        crop_therm = cv2.resize(cvs_therm, (TRAIN_SIZE, TRAIN_SIZE), interpolation=cv2.INTER_AREA)
-                        crop_evt = cv2.resize(cvs_evt, (TRAIN_SIZE, TRAIN_SIZE), interpolation=cv2.INTER_NEAREST)
+                        crop_vis = cv2.resize(vis_valid, (TRAIN_SIZE, TRAIN_SIZE), interpolation=cv2.INTER_AREA)
+                        crop_therm = cv2.resize(therm_valid, (TRAIN_SIZE, TRAIN_SIZE), interpolation=cv2.INTER_AREA)
+                        crop_evt = cv2.resize(evt_valid, (TRAIN_SIZE, TRAIN_SIZE), interpolation=cv2.INTER_NEAREST)
 
                         self.io_queue.put(
                             ("WRITE_FRAME", self.rec_dir, self.rec_frame_id, crop_vis, crop_therm, crop_evt, v_ts,
                              t_ts))
                         self.rec_frame_id += 1
 
-                        # 🟢 【核心分块逻辑】：满 60 帧，立刻封箱，无缝开启下一段录像！
                         if self.rec_frame_id == self.CHUNK_SIZE:
                             self.log_signal.emit(f"[REC] CHUNK COMPLETE (60 Frames): {os.path.basename(self.rec_dir)}")
                             self.is_recording = False
-                            # 下一次循环如果 triggered 仍然为 True，会自动调用 start_recording，实现 0 掉帧连续接力！
 
                 t_color_disp = aligned_color
 

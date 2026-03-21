@@ -35,7 +35,6 @@ class SentryDetector:
         self.target_box = None
         self.smoother = BoxSmoother()
 
-        # 事件流变成了极细的线，我们需要一个中等大小的核把它“充气”连接成一个面来算面积
         self.event_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (15, 15))
         self.thermal_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (21, 21))
 
@@ -43,31 +42,44 @@ class SentryDetector:
         self.e_area_min = 1000
         self.max_cooldown = 15
 
+        # 🟢 巨物防御：目标框最大面积不能超过屏幕的 60%
+        self.max_area_ratio = 0.6
+
     def update_params(self, t_val, e_val, cooldown):
         self.t_thresh_c = t_val
-        # 线条轮廓面积很小，UI传入的阈值在此缩小适配
         self.e_area_min = e_val / 4.0
         self.max_cooldown = cooldown
 
     def pad_box(self, box, p=20):
         x, y, w, h = box
-        return (max(0, x - p), max(0, y - p), min(VIS_W - (x - p), w + 2 * p), min(VIS_H - (y - p), h + 2 * p))
+        # 🟢 严谨的数学锁：先算起点的绝对安全坐标，再算宽高，绝不溢出！
+        nx = max(0, int(x - p))
+        ny = max(0, int(y - p))
+        nw = min(VIS_W - nx, int(w + 2 * p))
+        nh = min(VIS_H - ny, int(h + 2 * p))
+        return (nx, ny, nw, nh)
 
     def detect(self, aligned_temp_c, event_mask):
-        # 1. 提取事件轮廓 (Blue)
-        # 将线框闭合并膨胀成实心色块以便捕捉
-        e_closed = cv2.morphologyEx(event_mask, cv2.MORPH_CLOSE, self.event_kernel)
-        e_dilated = cv2.dilate(e_closed, self.event_kernel, iterations=1)
-        cnts_e, _ = cv2.findContours(e_dilated, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-
         box_e = None
-        if cnts_e:
-            ce = max(cnts_e, key=cv2.contourArea)
-            if cv2.contourArea(ce) > self.e_area_min:
-                box_e = cv2.boundingRect(ce)
+        total_pixels = VIS_W * VIS_H
 
-        # 2. 提取热力轮廓 (Green)
-        # 输入已经是物理对齐好的摄氏度矩阵，直接用 UI 的 t_thresh_c 进行布尔截断！
+        # 🟢 1. 提取事件轮廓 (带全局防抖保护)
+        event_pixel_count = cv2.countNonZero(event_mask)
+
+        # 如果满屏噪点超过 30%，判定为【手持摄像机整体抖动】，直接屏蔽本帧事件信号！
+        if event_pixel_count < total_pixels * 0.3:
+            e_closed = cv2.morphologyEx(event_mask, cv2.MORPH_CLOSE, self.event_kernel)
+            e_dilated = cv2.dilate(e_closed, self.event_kernel, iterations=1)
+            cnts_e, _ = cv2.findContours(e_dilated, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+            if cnts_e:
+                ce = max(cnts_e, key=cv2.contourArea)
+                area = cv2.contourArea(ce)
+                # 剔除小噪点，同时也剔除占据屏幕大半的假目标
+                if self.e_area_min < area < (total_pixels * self.max_area_ratio):
+                    box_e = cv2.boundingRect(ce)
+
+        # 🟢 2. 提取热力轮廓 (带巨物防御)
         t_mask = (aligned_temp_c > self.t_thresh_c).astype(np.uint8) * 255
         t_closed = cv2.morphologyEx(t_mask, cv2.MORPH_CLOSE, self.thermal_kernel)
         cnts_t, _ = cv2.findContours(t_closed, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
@@ -75,7 +87,8 @@ class SentryDetector:
         box_t = None
         if cnts_t:
             ct = max(cnts_t, key=cv2.contourArea)
-            if cv2.contourArea(ct) > 1500:
+            area_t = cv2.contourArea(ct)
+            if 1500 < area_t < (total_pixels * self.max_area_ratio):
                 box_t = cv2.boundingRect(ct)
 
         # 3. 状态判定与框融合
