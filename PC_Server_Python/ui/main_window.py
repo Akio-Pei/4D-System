@@ -82,7 +82,6 @@ QProgressBar { border: 1px solid #005500; background: #001100; text-align: cente
 QProgressBar::chunk { background-color: #00aa00; width: 10px; margin: 0.5px; }
 """
 
-
 class HUDDisplay(QLabel):
     clicked = pyqtSignal(str)
     dragged = pyqtSignal(int, int)
@@ -166,6 +165,7 @@ class MainWindow(QMainWindow):
         self.cur_lang = "EN"
         self._last_vals = {"x_crs": 0, "x_fin": 0, "y_crs": 0, "y_fin": 0}
         self.bridge_phase = 0
+        self.is_4dgs = False # 🟢 标记当前是否是 4DGS 训练
 
         if os.path.exists("images/logo.ico"): self.setWindowIcon(QIcon("images/logo.ico"))
         self.setWindowTitle(TRANS[self.cur_lang]["title"])
@@ -387,6 +387,7 @@ class MainWindow(QMainWindow):
         for k in self._last_vals: self._last_vals[k] = 0
 
     def generate_hexplane(self):
+        self.is_4dgs = False # 🟢 标记当前是 HexPlane
         d_dir = os.path.join(os.getcwd(), "auto_captures")
         if not os.path.exists(d_dir): os.makedirs(d_dir, exist_ok=True)
         t_dir = QFileDialog.getExistingDirectory(self, "Select Recorded Data Folder for HexPlane", d_dir)
@@ -402,6 +403,7 @@ class MainWindow(QMainWindow):
             self.bridge_process.start(sys.executable, ["tools/bridge.py", "--target", t_dir])
 
     def generate_4dgs(self):
+        self.is_4dgs = True # 🟢 标记当前是 4DGS
         d_dir = os.path.join(os.getcwd(), "auto_captures")
         if not os.path.exists(d_dir): os.makedirs(d_dir, exist_ok=True)
         t_dir = QFileDialog.getExistingDirectory(self, "Select Recorded Data for MET-4DGS", d_dir)
@@ -428,14 +430,18 @@ class MainWindow(QMainWindow):
             if not line: continue
             clean_line = ansi_escape.sub('', line)
 
+            # 🟢 完美的进度条匹配逻辑
             match_hex = re.search(r'(\d+)/3000', clean_line)
-            match_gs = re.search(r'(\d+)/7000', clean_line)
+            match_gs = re.search(r'(\d+)/15000', clean_line)
             match_render = re.search(r'(\d+)/1080', clean_line)
 
-            if match_hex:
-                self.prog_gen.setValue(int((int(match_hex.group(1)) / 3000.0) * 100))
-            elif match_gs:
-                self.prog_gen.setValue(int((int(match_gs.group(1)) / 7000.0) * 100))
+            if match_gs:
+                self.prog_gen.setValue(int((int(match_gs.group(1)) / 15000.0) * 100))
+            elif match_hex:
+                if self.is_4dgs:
+                    self.prog_gen.setValue(int((int(match_hex.group(1)) / 15000.0) * 100))
+                else:
+                    self.prog_gen.setValue(int((int(match_hex.group(1)) / 3000.0) * 100))
             elif match_render:
                 self.prog_gen.setValue(int((int(match_render.group(1)) / 1080.0) * 100))
 
@@ -458,9 +464,7 @@ class MainWindow(QMainWindow):
             self.log_msg(f"▶️ Playing HexPlane Video: {os.path.basename(video_path)}")
             os.startfile(video_path)
 
-    # 🟢 终极寻路：一键定位你的 auto_captures！
     def launch_4dgs_viewer(self):
-        # 强制默认打开当前工作目录下的 auto_captures 文件夹
         base_log_dir = os.path.join(os.getcwd(), "auto_captures")
         if not os.path.exists(base_log_dir): os.makedirs(base_log_dir, exist_ok=True)
 
@@ -592,7 +596,6 @@ class MainWindow(QMainWindow):
             self.th_t.stop()
         except:
             pass
-
 
 if __name__ == "__main__":
     from PyQt6.QtWidgets import QApplication
